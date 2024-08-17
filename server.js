@@ -4,10 +4,16 @@ const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const session = require("express-session");
 const mongodbSession = require("connect-mongodb-session")(session);
+const jwt = require("jsonwebtoken");
 
 //file imports
 const userModel = require("./models/userModel");
-const { isEmailValidate } = require("./utils/authUtils");
+const {
+  isEmailValidate,
+  generateToken,
+  sendVerificationMail,
+  userDataValidation,
+} = require("./utils/authUtils");
 const isAuth = require("./middlewares/isAuthMiddleware");
 const todoModel = require("./models/todoModel");
 const { todoDataValidation } = require("./utils/todoUtils");
@@ -71,7 +77,7 @@ app.get("/", (req, res) => {
 app.get("/test", (req, res) => {
   return res.render("test");
 });
-   
+
 //Registration API's
 app.get("/register", (req, res) => {
   return res.render("registerPage");
@@ -80,6 +86,13 @@ app.get("/register", (req, res) => {
 app.post("/register", async (req, res) => {
   console.log(req.body);
   const { name, email, username, password } = req.body;
+
+  //data validation
+  try {
+    await userDataValidation({ name, email, username, password });
+  } catch (error) {
+    return res.status(400).json(error);
+  }
 
   try {
     //check email exist or not
@@ -113,14 +126,41 @@ app.post("/register", async (req, res) => {
     console.log(userObj);
 
     const userDB = await userObj.save();
+
+    //generate token
+    const token = generateToken(email);
+    console.log(token);
+    sendVerificationMail(email, token);
+
+    return res.redirect("/login");
+  } catch (error) {
+    console.log(error);
     return res
-      .status(201)
-      .json({ message: "User Created Succesfully", data: userDB });
-  } catch (err) {
-    return res.status(500).json(err);
+      .status(500)
+      .json({ message: "Internal server error", error: error });
   }
 
   // return res.send("Registeration Successfull");
+});
+
+//Verify Email
+app.get("/verify/:token", async (req, res) => {
+  console.log(req.params);
+
+  const token = req.params.token;
+
+  const email = jwt.verify(token, process.env.SECRET_KEY);
+  console.log(email);
+
+  try {
+    await userModel.findOneAndUpdate(
+      { email: email },
+      { isEmailVerified: true }
+    );
+    return res.status(200).json("Email Verified Successfully");
+  } catch (error) {
+    return res.status(500).json(error);
+  }
 });
 
 //Login API's
@@ -154,6 +194,11 @@ app.post("/login", async (req, res) => {
     console.log(userDb);
     if (!userDb) {
       return res.status(400).json("User not found, please register first");
+    }
+
+    //email verified
+    if (!userDb.isEmailVerified) {
+      return res.status(400).json("Please verify your email, before login.");
     }
 
     //Compare the Password
@@ -197,33 +242,33 @@ app.post("/logout", isAuth, (req, res) => {
 });
 
 //logout from all devices
-app.post("/logout-from-all",isAuth, async(req,res)=>{
-    console.log(req.session);
+app.post("/logout-from-all", isAuth, async (req, res) => {
+  console.log(req.session);
 
-    const username = req.session.user.username;
+  const username = req.session.user.username;
 
-    const sessionSchema = new mongoose.Schema({_id:String},{strict:false});
-    const sessionModel = mongoose.model("Session", sessionSchema);
+  const sessionSchema = new mongoose.Schema({ _id: String }, { strict: false });
+  const sessionModel = mongoose.model("Session", sessionSchema);
 
-    try{
-      const deleteDb = await sessionModel.deleteMany({
-        "session.user.username" : username,
-      });
-    
-      console.log(deleteDb);
+  try {
+    const deleteDb = await sessionModel.deleteMany({
+      "session.user.username": username,
+    });
 
-      return res
+    console.log(deleteDb);
+
+    return res
       .status(200)
       .json(`Logout from ${deleteDb.deletedCount} devices Successfull`);
-    }catch(err){
-        return res.status(500).json(err);
-    }
+  } catch (err) {
+    return res.status(500).json(err);
+  }
 });
 
 //Todo CRED Operations
 
 //Create todo
-app.post("/create-todo", isAuth, rateLimiting , async (req, res) => {
+app.post("/create-todo", isAuth, rateLimiting, async (req, res) => {
   console.log(req.session);
   console.log(req.body);
   const username = req.session.user.username;
@@ -267,18 +312,18 @@ app.get("/read-todo", isAuth, async (req, res) => {
   console.log(SKIP);
   try {
     // const todoDb = await todoModel.find({ username });
-     
+
     const todoDb = await todoModel.aggregate([
       {
-        $match: {username: username},
+        $match: { username: username },
       },
       {
         $skip: SKIP,
       },
       {
         $limit: 5,
-      }
-    ])
+      },
+    ]);
     console.log(todoDb);
 
     if (todoDb.length === 0) {
@@ -304,7 +349,7 @@ app.get("/read-todo", isAuth, async (req, res) => {
 
 //Edit todo
 app.post("/edit-todo", isAuth, async (req, res) => {
-  console.log(req.body,"request body edit todo");
+  console.log(req.body, "request body edit todo");
   const newTodo = req.body.newTodo;
   const todo_id = req.body.todo_id;
   const usernameReq = req.session.user.username;
@@ -359,7 +404,7 @@ app.post("/edit-todo", isAuth, async (req, res) => {
 });
 
 //Delete todo
-app.post("/delete-todo", isAuth, async (req,res)=>{
+app.post("/delete-todo", isAuth, async (req, res) => {
   console.log(req.body);
   const todo_id = req.body.todo_id;
   const usernameReq = req.session.user.username;
@@ -384,9 +429,7 @@ app.post("/delete-todo", isAuth, async (req,res)=>{
     }
 
     //Delete todo
-    const todoDbDelete = await todoModel.findOneAndDelete(
-      { _id: todo_id },
-    );
+    const todoDbDelete = await todoModel.findOneAndDelete({ _id: todo_id });
 
     return res.send({
       status: 200,
